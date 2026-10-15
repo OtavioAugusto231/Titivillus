@@ -19,22 +19,39 @@ from pydantic import BaseModel
 # ============================================================
 
 BASE_DIR = pathlib.Path(__file__).resolve().parent
+
+
+def carregar_env(caminho):
+    """Carrega KEY=VALOR de um .env simples (sem dependências).
+    Variáveis já exportadas no shell têm prioridade."""
+    if not caminho.is_file():
+        return
+    for linha in caminho.read_text(encoding="utf-8").splitlines():
+        linha = linha.strip()
+        if not linha or linha.startswith("#") or "=" not in linha:
+            continue
+        chave, valor = linha.split("=", 1)
+        os.environ.setdefault(chave.strip(), valor.strip().strip("'\""))
+
+
+carregar_env(BASE_DIR / ".env")
+
 PASTA_CAPAS = BASE_DIR / "capas"
 ARQUIVO_EXCEL = BASE_DIR / "livros.xlsx"
 
-# Pode sobrescrever via variável de ambiente sem editar o código.
 MODELO = os.environ.get("GEMINI_MODEL", "gemini-3.1-flash-lite").strip()
-# Modelo só da etapa de faixa etária (opcional; padrão = MODELO).
 MODELO_FAIXA = os.environ.get("GEMINI_MODEL_FAIXA", "").strip() or MODELO
+MODELO_FAIXA_FALLBACK = os.environ.get(
+    "GEMINI_MODEL_FAIXA_FALLBACK", "gemini-2.5-flash"
+).strip()
 
-# Defina GEMINI_API_KEY no ambiente. Não grave a chave diretamente no código.
 API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 client = genai.Client(api_key=API_KEY) if API_KEY else None
 
-# Recomendado: sem chave a cota anônima do Google Books costuma dar 429.
-# Crie em console.cloud.google.com (API "Books API") e exporte GOOGLE_BOOKS_API_KEY.
+# Sem chave, a cota anônima do Google Books estoura (429) quase sempre.
+# Crie em console.cloud.google.com (ative "Books API") e coloque no .env:
+#   GOOGLE_BOOKS_API_KEY=sua_chave
 GOOGLE_BOOKS_KEY = os.environ.get("GOOGLE_BOOKS_API_KEY", "").strip()
-_google_books_bloqueado = False
 
 EXTENSOES = {
     ".jpg": "image/jpeg",
@@ -43,12 +60,22 @@ EXTENSOES = {
     ".webp": "image/webp",
 }
 
-# Renomeia a foto somente se o livro for confirmado no Google Books.
+# Renomeia a foto somente se o livro for confirmado (status "validado").
 RENOMEAR_APENAS_VALIDADOS = True
 
-TENTATIVAS = 3
 CODIGOS_RETENTAVEIS = {429, 500, 502, 503, 504}
-LIMITE_NOME_ARQUIVO = 80  # caracteres por campo (evita estourar 255 bytes)
+ESPERAS_GEMINI = (5, 15, 30)
+ESPERAS_BOOKS = (5, 15, 40)
+ESPERAS_BOOKS_SEM_CHAVE = (5,)  # sem chave, insistir só desperdiça tempo
+GB_INTERVALO = 1.2
+GB_COOLDOWN_COM_CHAVE = 120  # s sem consultar o Google Books após esgotar retries
+GB_COOLDOWN_SEM_CHAVE = 900
+LIMITE_NOME_ARQUIVO = 80
+
+LIMIAR_TITULO = 0.70
+LIMIAR_AUTOR = 0.65
+LIMIAR_TITULO_SEM_AUTOR = 0.85
+LIMIAR_PARCIAL = 0.92  # só título: sugere, mas NÃO valida nem renomeia
 
 FAIXAS = ["Livre", "7+", "10+", "12+", "14+", "16+", "18+"]
 
@@ -69,37 +96,11 @@ Regras:
 - Não confunda editora, tradutor ou ilustrador com o autor.
 - O autor pode ser pseudônimo, nome artístico ou nome de canal/youtuber/marca
   impresso na capa. Se um nome aparece como autoria, preencha o campo autor.
+- Transcreva nomes letra por letra, com atenção à primeira letra (erros comuns:
+  M/I/N, O/Q, rn/m).
 - Responda somente em JSON válido:
   {"titulo": "string ou null", "volume": "string ou null", "autor": "string ou null"}
 """
-
-CAMPOS = [
-    "titulo",
-    "volume",
-    "autor",
-    "faixa_etaria",
-    "titulo_google_books",
-    "autor_google_books",
-    "validado",
-    "fonte_validacao",
-    "arquivo",
-    "erro",
-]
-
-
-class Capa(BaseModel):
-    titulo: Optional[str] = None
-    volume: Optional[str] = None
-    autor: Optional[str] = None
-
-
-class Autor(BaseModel):
-    autor: Optional[str] = None
-
-
-class FaixaEtaria(BaseModel):
-    faixa_etaria: Optional[str] = None
-
 
 PROMPT_AUTOR = """
 Esta é a capa (ou lombada) de um livro. Diga APENAS quem aparece como autor.
@@ -129,6 +130,40 @@ Regras:
 - Responda somente em JSON válido: {{"faixa_etaria": "valor ou null"}}
 """
 
+CAMPOS = [
+    "titulo",
+    "volume",
+    "autor",
+    "faixa_etaria",
+    "titulo_google_books",
+    "autor_google_books",
+    "validado",
+    "status",
+    "fonte_validacao",
+    "arquivo",
+    "erro",
+]
+
+STATUS_VALIDADO = "validado"
+STATUS_PARCIAL = "parcial (conferir autor)"
+STATUS_SEM_MATCH = "sem correspondência"
+STATUS_INCONCLUSIVO = "inconclusivo (fonte indisponível)"
+STATUS_ERRO = "erro"
+
+
+class Capa(BaseModel):
+    titulo: Optional[str] = None
+    volume: Optional[str] = None
+    autor: Optional[str] = None
+
+
+class Autor(BaseModel):
+    autor: Optional[str] = None
+
+
+class FaixaEtaria(BaseModel):
+    faixa_etaria: Optional[str] = None
+
 
 # ============================================================
 # UTILITÁRIOS
@@ -152,7 +187,7 @@ def texto_seguro(valor):
 
 
 def normalizar(texto):
-    """Normaliza texto para comparação: sem acentos, pontuação e caixa."""
+    """Sem acentos, pontuação e caixa."""
     texto = texto_seguro(texto) or ""
     texto = unicodedata.normalize("NFKD", texto)
     texto = "".join(c for c in texto if not unicodedata.combining(c))
@@ -161,20 +196,16 @@ def normalizar(texto):
 
 
 def similaridade(a, b):
-    """Similaridade entre 0 e 1, tolerante a subtítulo e a ordem de tokens."""
+    """Similaridade 0..1, tolerante a subtítulo e a ordem de tokens."""
     a = normalizar(a)
     b = normalizar(b)
     if not a or not b:
         return 0.0
 
     direta = SequenceMatcher(None, a, b).ratio()
-
-    # "Sobrenome, Nome" vs "Nome Sobrenome"
     ordenada = SequenceMatcher(
         None, " ".join(sorted(a.split())), " ".join(sorted(b.split()))
     ).ratio()
-
-    # Título sem subtítulo (ou o contrário)
     menor, maior = sorted((a, b), key=len)
     contido = 0.9 if len(menor) >= 5 and menor in maior else 0.0
 
@@ -210,6 +241,8 @@ def resultado_vazio(arquivo, erro):
         "titulo_google_books": None,
         "autor_google_books": None,
         "validado": False,
+        "status": STATUS_ERRO,
+        "fonte_validacao": None,
         "arquivo": arquivo,
         "erro": erro,
     }
@@ -250,17 +283,13 @@ def renomear_foto(path, titulo, autor, volume=None):
 # ============================================================
 
 
-def chamar_gemini(dados_imagem, mime, prompt=PROMPT, schema=Capa):
-    ultimo_erro = None
-
-    for tentativa in range(1, TENTATIVAS + 1):
+def gerar_com_retry(modelo, contents, schema):
+    """generate_content com backoff para 429/5xx. Levanta o erro final."""
+    for tentativa in range(len(ESPERAS_GEMINI) + 1):
         try:
             return client.models.generate_content(
-                model=MODELO,
-                contents=[
-                    types.Part.from_bytes(data=dados_imagem, mime_type=mime),
-                    prompt,
-                ],
+                model=modelo,
+                contents=contents,
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
                     response_schema=schema,
@@ -268,23 +297,28 @@ def chamar_gemini(dados_imagem, mime, prompt=PROMPT, schema=Capa):
                 ),
             )
         except genai_errors.APIError as erro:
-            ultimo_erro = erro
             codigo = getattr(erro, "code", None)
 
             if codigo == 404:
                 raise RuntimeError(
-                    f"Modelo '{MODELO}' não encontrado. Liste os disponíveis com "
+                    f"Modelo '{modelo}' não encontrado. Liste os disponíveis com "
                     "client.models.list() e defina GEMINI_MODEL com o ID exato."
                 ) from erro
 
-            if codigo in CODIGOS_RETENTAVEIS and tentativa < TENTATIVAS:
-                espera = 2**tentativa
+            if codigo in CODIGOS_RETENTAVEIS and tentativa < len(ESPERAS_GEMINI):
+                espera = ESPERAS_GEMINI[tentativa]
                 print(f"  API retornou {codigo}; nova tentativa em {espera}s...")
                 time.sleep(espera)
                 continue
             raise
 
-    raise ultimo_erro  # pragma: no cover
+
+def chamar_gemini(dados_imagem, mime, prompt=PROMPT, schema=Capa):
+    return gerar_com_retry(
+        MODELO,
+        [types.Part.from_bytes(data=dados_imagem, mime_type=mime), prompt],
+        schema,
+    )
 
 
 def ler_autor(path, mime):
@@ -299,53 +333,45 @@ def ler_autor(path, mime):
 
 
 def ler_faixa_etaria(titulo, autor=None):
-    """Chamada só de texto. Retorna uma das FAIXAS ou None."""
+    """Chamada só de texto. Tenta o modelo principal e depois o fallback.
+    Retorna uma das FAIXAS ou None."""
     if not titulo or client is None:
         return None
 
     autor_txt = f", de {autor}" if autor else ""
     prompt = PROMPT_FAIXA.format(titulo=titulo, autor_txt=autor_txt)
 
-    for tentativa in range(1, TENTATIVAS + 1):
+    modelos = [MODELO_FAIXA]
+    if MODELO_FAIXA_FALLBACK and MODELO_FAIXA_FALLBACK != MODELO_FAIXA:
+        modelos.append(MODELO_FAIXA_FALLBACK)
+
+    for modelo in modelos:
         try:
-            resposta = client.models.generate_content(
-                model=MODELO_FAIXA,
-                contents=[prompt],
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    response_schema=FaixaEtaria,
-                    temperature=0,
-                ),
-            )
-            dados = json.loads(getattr(resposta, "text", None) or "{}")
-            valor = (
-                texto_seguro(dados.get("faixa_etaria"))
-                if isinstance(dados, dict)
-                else None
-            )
-            if not valor:
-                return None
-            valor = valor.replace(" ", "")
-            return valor if valor in FAIXAS else None
-        except genai_errors.APIError as erro:
-            codigo = getattr(erro, "code", None)
-            if codigo in CODIGOS_RETENTAVEIS and tentativa < TENTATIVAS:
-                espera = 2**tentativa
-                print(f"  API retornou {codigo}; nova tentativa em {espera}s...")
-                time.sleep(espera)
-                continue
-            print(f"  Faixa etária falhou: {erro}")
-            return None
+            resposta = gerar_com_retry(modelo, [prompt], FaixaEtaria)
         except Exception as erro:
-            print(f"  Faixa etária falhou: {erro}")
-            return None
+            print(f"  Faixa etária falhou em {modelo}: {erro}")
+            continue
+
+        try:
+            dados = json.loads(getattr(resposta, "text", None) or "{}")
+        except (json.JSONDecodeError, TypeError):
+            continue
+
+        valor = (
+            texto_seguro(dados.get("faixa_etaria")) if isinstance(dados, dict) else None
+        )
+        if not valor:
+            return None  # "não sei"; fallback não muda isso
+        valor = valor.replace(" ", "")
+        return valor if valor in FAIXAS else None
+
     return None
 
 
 def ler_capa(path):
     if client is None:
         raise RuntimeError(
-            "Chave Gemini ausente. Defina a variável de ambiente GEMINI_API_KEY."
+            "Chave Gemini ausente. Defina GEMINI_API_KEY (ambiente ou .env)."
         )
 
     mime = EXTENSOES.get(path.suffix.lower())
@@ -385,36 +411,64 @@ def ler_capa(path):
 
 
 # ============================================================
-# 2. VALIDAÇÃO COM GOOGLE BOOKS
+# 2. VALIDAÇÃO (GOOGLE BOOKS + OPEN LIBRARY)
 # ============================================================
+
+_gb_ultimo = 0.0  # instante da última requisição ao Google Books
+_gb_bloqueado_ate = 0.0  # circuit breaker: não insiste enquanto em cooldown
+
+
+class GoogleBooksIndisponivel(requests.RequestException):
+    """Google Books em cooldown após esgotar as tentativas."""
 
 
 def buscar_google_books(consulta):
-    global _google_books_bloqueado
-    if _google_books_bloqueado:
-        raise requests.RequestException("pulado: cota excedida (429) nesta execução")
+    """Consulta ao Google Books com throttle, backoff e Retry-After.
+    Esgotou as tentativas em 429/5xx? Entra em cooldown e as próximas
+    imagens pulam o Google Books direto, em vez de perder ~1 min cada."""
+    global _gb_ultimo, _gb_bloqueado_ate
+
+    restante = _gb_bloqueado_ate - time.monotonic()
+    if restante > 0:
+        raise GoogleBooksIndisponivel(f"em cooldown por mais {int(restante)}s")
 
     params = {"q": consulta, "maxResults": 10, "printType": "books"}
     if GOOGLE_BOOKS_KEY:
         params["key"] = GOOGLE_BOOKS_KEY
 
-    for tentativa in range(1, TENTATIVAS + 1):
+    esperas = ESPERAS_BOOKS if GOOGLE_BOOKS_KEY else ESPERAS_BOOKS_SEM_CHAVE
+
+    for tentativa in range(len(esperas) + 1):
+        folga = GB_INTERVALO - (time.monotonic() - _gb_ultimo)
+        if folga > 0:
+            time.sleep(folga)
+
         resposta = requests.get(
             "https://www.googleapis.com/books/v1/volumes",
             params=params,
             timeout=15,
         )
-        if resposta.status_code in CODIGOS_RETENTAVEIS and tentativa < TENTATIVAS:
-            espera = 2**tentativa
-            print(
-                f"  Google Books {resposta.status_code}; nova tentativa em {espera}s..."
-            )
-            time.sleep(espera)
-            continue
-        break
+        _gb_ultimo = time.monotonic()
 
-    if resposta.status_code == 429:
-        _google_books_bloqueado = True
+        if resposta.status_code not in CODIGOS_RETENTAVEIS:
+            break
+        if tentativa == len(esperas):
+            cooldown = (
+                GB_COOLDOWN_COM_CHAVE if GOOGLE_BOOKS_KEY else GB_COOLDOWN_SEM_CHAVE
+            )
+            _gb_bloqueado_ate = time.monotonic() + cooldown
+            print(
+                f"  Google Books segue em {resposta.status_code}; "
+                f"pulando-o pelos próximos {cooldown // 60} min."
+            )
+            break
+
+        espera = esperas[tentativa]
+        retry_after = resposta.headers.get("Retry-After", "")
+        if retry_after.isdigit():
+            espera = max(espera, int(retry_after))
+        print(f"  Google Books {resposta.status_code}; nova tentativa em {espera}s...")
+        time.sleep(espera)
 
     resposta.raise_for_status()
     corpo = resposta.json()
@@ -422,12 +476,9 @@ def buscar_google_books(consulta):
     return itens if isinstance(itens, list) else []
 
 
-def buscar_open_library(titulo, autor):
-    """Fallback sem chave. Devolve itens no mesmo formato do Google Books."""
-    params = {"title": titulo, "limit": 10, "fields": "title,author_name"}
-    if autor:
-        params["author"] = autor
-
+def _open_library_get(params):
+    params = {**params, "limit": 20, "fields": "title,author_name"}
+    resposta = None
     for tentativa in range(1, 3):
         try:
             resposta = requests.get(
@@ -459,25 +510,45 @@ def buscar_open_library(titulo, autor):
     return itens
 
 
+def buscar_open_library(titulo, autor):
+    """Sem chave. 1ª consulta: só título (filtro de autor na API zera
+    resultados). Se não casar e houver autor, 2ª consulta livre 'título autor'.
+    O match de autor é feito localmente, com fuzzy."""
+    itens = _open_library_get({"title": titulo})
+    if autor and not escolher_melhor(itens, titulo, autor):
+        try:
+            itens = itens + _open_library_get({"q": f"{titulo} {autor}"})
+        except (requests.RequestException, ValueError):
+            pass  # aproveita o que a 1ª consulta trouxe
+    return itens
+
+
+def _extrair(item):
+    """Devolve (titulo_api, [autores_api]) ou None se o item for inválido."""
+    if not isinstance(item, dict):
+        return None
+    volume = item.get("volumeInfo", {})
+    if not isinstance(volume, dict):
+        return None
+    titulo_api = texto_seguro(volume.get("title"))
+    if not titulo_api:
+        return None
+    autores = volume.get("authors", [])
+    if not isinstance(autores, list):
+        autores = []
+    return titulo_api, [a for a in map(texto_seguro, autores) if a]
+
+
 def escolher_melhor(itens, titulo, autor):
+    """Match completo: título E autor (quando há autor)."""
     melhor = None
     melhor_pontuacao = 0.0
 
     for item in itens:
-        if not isinstance(item, dict):
+        extraido = _extrair(item)
+        if not extraido:
             continue
-        volume = item.get("volumeInfo", {})
-        if not isinstance(volume, dict):
-            continue
-
-        titulo_api = texto_seguro(volume.get("title"))
-        if not titulo_api:
-            continue
-
-        autores_api = volume.get("authors", [])
-        if not isinstance(autores_api, list):
-            autores_api = []
-        autores_api = [a for a in map(texto_seguro, autores_api) if a]
+        titulo_api, autores_api = extraido
 
         pontuacao_titulo = similaridade(titulo, titulo_api)
 
@@ -485,28 +556,61 @@ def escolher_melhor(itens, titulo, autor):
             if not autores_api:
                 continue
             pontuacao_autor = max(similaridade(autor, nome) for nome in autores_api)
-            if pontuacao_titulo < 0.70 or pontuacao_autor < 0.65:
+            if pontuacao_titulo < LIMIAR_TITULO or pontuacao_autor < LIMIAR_AUTOR:
                 continue
             pontuacao = 0.70 * pontuacao_titulo + 0.30 * pontuacao_autor
         else:
-            if pontuacao_titulo < 0.85:
+            if pontuacao_titulo < LIMIAR_TITULO_SEM_AUTOR:
                 continue
             pontuacao = pontuacao_titulo
 
         if pontuacao > melhor_pontuacao:
             melhor_pontuacao = pontuacao
-            melhor = {
-                "titulo": titulo_api,
-                "autor": ", ".join(autores_api) or None,
-            }
+            melhor = {"titulo": titulo_api, "autor": ", ".join(autores_api) or None}
 
     return melhor
+
+
+def escolher_parcial(itens, titulo):
+    """Título quase idêntico, autor divergente/ausente. Serve de SUGESTÃO para
+    revisão humana (ex.: autor lido errado no OCR); nunca valida nem renomeia."""
+    melhor = None
+    melhor_pontuacao = 0.0
+    for item in itens:
+        extraido = _extrair(item)
+        if not extraido:
+            continue
+        titulo_api, autores_api = extraido
+        pontuacao = similaridade(titulo, titulo_api)
+        if pontuacao >= LIMIAR_PARCIAL and pontuacao > melhor_pontuacao:
+            melhor_pontuacao = pontuacao
+            melhor = {"titulo": titulo_api, "autor": ", ".join(autores_api) or None}
+    return melhor
+
+
+def buscar_google_books_duas_consultas(estrita, solta, titulo, autor):
+    """Estrita primeiro; a solta só se a estrita não deu match.
+    Se a 2ª falhar mas a 1ª respondeu, aproveita o que já veio."""
+    itens = []
+    for i, consulta in enumerate((estrita, solta)):
+        try:
+            novos = buscar_google_books(consulta)
+        except (requests.RequestException, ValueError):
+            if i == 0:
+                raise
+            break
+        itens.extend(novos)
+        if escolher_melhor(itens, titulo, autor):
+            break
+    return itens
 
 
 def validar(d):
     d["titulo_google_books"] = None
     d["autor_google_books"] = None
     d["validado"] = False
+    d["fonte_validacao"] = None
+    d["status"] = STATUS_SEM_MATCH
 
     titulo = texto_seguro(d.get("titulo"))
     autor = texto_seguro(d.get("autor"))
@@ -514,7 +618,6 @@ def validar(d):
     if not titulo:
         return d
 
-    # Consulta estrita primeiro; se não achar nada, consulta solta.
     estrita = f'intitle:"{titulo}"'
     if autor:
         estrita += f' inauthor:"{autor}"'
@@ -523,17 +626,13 @@ def validar(d):
     fontes = [
         (
             "Google Books",
-            lambda: [
-                item
-                for consulta in (estrita, solta)
-                for item in buscar_google_books(consulta)
-            ],
+            lambda: buscar_google_books_duas_consultas(estrita, solta, titulo, autor),
         ),
         ("Open Library", lambda: buscar_open_library(titulo, autor)),
     ]
 
     falhas = []
-    consultou_alguma = False
+    todos = []  # (fonte, itens) das fontes que responderam
 
     for nome, buscar in fontes:
         try:
@@ -543,7 +642,6 @@ def validar(d):
             print(f"  {nome} indisponível, tentando próxima fonte...")
             continue
 
-        consultou_alguma = True
         melhor = escolher_melhor(itens, titulo, autor)
         print(
             f"  {nome}: {len(itens)} candidato(s), match={'sim' if melhor else 'não'}"
@@ -552,12 +650,26 @@ def validar(d):
             d["titulo_google_books"] = melhor["titulo"]
             d["autor_google_books"] = melhor["autor"]
             d["validado"] = True
+            d["status"] = STATUS_VALIDADO
             d["fonte_validacao"] = nome
             return d
+        todos.append((nome, itens))
 
-    # Só marca erro se NENHUMA fonte respondeu. Sem match com fonte ativa não é erro.
-    if not consultou_alguma and falhas:
-        d["erro"] = "Falha na validação: " + " | ".join(falhas)
+    # Sem match completo: procura sugestão por título (revisão humana).
+    for nome, itens in todos:
+        parcial = escolher_parcial(itens, titulo)
+        if parcial:
+            d["titulo_google_books"] = parcial["titulo"]
+            d["autor_google_books"] = parcial["autor"]
+            d["fonte_validacao"] = f"{nome} (só título)"
+            d["status"] = STATUS_PARCIAL
+            break
+
+    # Fonte que falhou torna o "sem match" inconclusivo.
+    if falhas:
+        d["erro"] = "Validação incompleta: " + " | ".join(falhas)
+        if d["status"] == STATUS_SEM_MATCH:
+            d["status"] = STATUS_INCONCLUSIVO
 
     return d
 
@@ -570,13 +682,24 @@ def validar(d):
 def processar_imagem(path):
     print(f"\nProcessando: {path.name}")
 
+    # A lista é tirada no início da execução; se o arquivo sumiu depois
+    # (renomeado/movido por outra execução, sync, explorador de arquivos...),
+    # falha com mensagem clara em vez de estourar Errno 2 lá no meio.
+    if not path.exists():
+        msg = (
+            "Arquivo não existe mais (renomeado ou movido depois da listagem; "
+            "há outra execução do script ou sincronização mexendo na pasta?)"
+        )
+        print(f"  Pulado: {msg}")
+        return resultado_vazio(path.name, msg)
+
     try:
         dados = ler_capa(path)
         dados["erro"] = None
         dados["arquivo"] = path.name
         dados = validar(dados)
 
-        # Título/autor canônicos do Google Books têm prioridade quando validado.
+        # Título/autor canônicos validados têm prioridade para a faixa etária.
         titulo_faixa = (
             dados.get("titulo_google_books") if dados["validado"] else None
         ) or dados.get("titulo")
@@ -589,12 +712,19 @@ def processar_imagem(path):
             f"  Lido: {dados.get('titulo')!r} | vol {dados.get('volume')!r} "
             f"| {dados.get('autor')!r} | faixa {dados.get('faixa_etaria')!r}"
         )
-        if dados.get("erro"):
-            print(f"  Erro: {dados['erro']}")
-        elif dados["validado"]:
-            print(f"  Validado: {dados['titulo_google_books']!r}")
-        else:
-            print("  Sem correspondência no Google Books.")
+        print(f"  Status: {dados['status']}")
+        if dados["validado"]:
+            print(
+                f"  Validado ({dados['fonte_validacao']}): "
+                f"{dados['titulo_google_books']!r}"
+            )
+        elif dados["status"] == STATUS_PARCIAL:
+            print(
+                f"  Sugestão ({dados['fonte_validacao']}): "
+                f"{dados['titulo_google_books']!r} de {dados['autor_google_books']!r}"
+            )
+        elif dados.get("erro"):
+            print(f"  Fonte com falha: {dados['erro']}")
 
         if dados["validado"] or not RENOMEAR_APENAS_VALIDADOS:
             if dados.get("titulo"):
@@ -643,7 +773,7 @@ def exportar_excel(registros):
         if "openpyxl" in str(erro):
             raise RuntimeError(
                 "A biblioteca openpyxl não está instalada no ambiente virtual. "
-                "Execute: venv/bin/python -m pip install openpyxl"
+                "Execute: .venv/bin/python -m pip install openpyxl"
             ) from erro
         raise
     except PermissionError as erro:
@@ -672,8 +802,23 @@ def main():
         print("Adicione arquivos JPG, JPEG, PNG ou WEBP à pasta capas.")
         return
 
+    if not GOOGLE_BOOKS_KEY:
+        print(
+            "Aviso: GOOGLE_BOOKS_API_KEY ausente. Google Books será tentado com "
+            "retry curto e pulado por 15 min se continuar em 429."
+        )
+
     print(f"Imagens encontradas: {len(imagens)} (modelo: {MODELO})")
-    registros = [processar_imagem(imagem) for imagem in imagens]
+
+    registros = []
+    try:
+        for imagem in imagens:
+            registros.append(processar_imagem(imagem))
+    except KeyboardInterrupt:
+        print("\nInterrompido. Exportando o que já foi processado...")
+
+    if not registros:
+        return
 
     try:
         exportar_excel(registros)
@@ -682,14 +827,18 @@ def main():
         return
 
     confirmados = sum(1 for r in registros if r["validado"])
-    erros = sum(1 for r in registros if r["erro"])
+    parciais = sum(1 for r in registros if r["status"] == STATUS_PARCIAL)
+    inconclusivos = sum(1 for r in registros if r["status"] == STATUS_INCONCLUSIVO)
+    erros = sum(1 for r in registros if r["status"] == STATUS_ERRO)
     com_faixa = sum(1 for r in registros if r.get("faixa_etaria"))
 
     print("\n========== RESULTADO ==========")
     print(f"Imagens processadas: {len(registros)}")
-    print(f"Correspondências encontradas: {confirmados}")
+    print(f"Validados: {confirmados}")
+    print(f"Parciais (título bate, conferir autor): {parciais}")
+    print(f"Inconclusivos (fonte fora do ar): {inconclusivos}")
+    print(f"Erros de processamento: {erros}")
     print(f"Faixa etária preenchida: {com_faixa}")
-    print(f"Registros com erros: {erros}")
     print(f"Planilha criada: {ARQUIVO_EXCEL}")
 
 
