@@ -1,1 +1,9 @@
 capas/
+# Ignorar arquivos Excel
+*.xlsx
+*.xls
+*.xlsm
+
+# Ignorar arquivos temporários do Excel
+~$*.xlsx
+~$*.xls
