@@ -20,7 +20,9 @@ ARQUIVO_EXCEL = BASE_DIR / "livros.xlsx"
 
 MODELO = "gemini-3.1-flash-lite"
 
-client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+client = genai.Client(
+    api_key=os.environ["SUA_CHAVE_API_AQUI"]
+)  # Substitua pela sua chave de API do Gemini.
 
 PROMPT = """
 Analise a imagem da capa de um livro.
