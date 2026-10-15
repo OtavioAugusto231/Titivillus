@@ -24,6 +24,8 @@ ARQUIVO_EXCEL = BASE_DIR / "livros.xlsx"
 
 # Pode sobrescrever via variável de ambiente sem editar o código.
 MODELO = os.environ.get("GEMINI_MODEL", "gemini-3.1-flash-lite").strip()
+# Modelo só da etapa de faixa etária (opcional; padrão = MODELO).
+MODELO_FAIXA = os.environ.get("GEMINI_MODEL_FAIXA", "").strip() or MODELO
 
 # Defina GEMINI_API_KEY no ambiente. Não grave a chave diretamente no código.
 API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
@@ -47,6 +49,8 @@ RENOMEAR_APENAS_VALIDADOS = True
 TENTATIVAS = 3
 CODIGOS_RETENTAVEIS = {429, 500, 502, 503, 504}
 LIMITE_NOME_ARQUIVO = 80  # caracteres por campo (evita estourar 255 bytes)
+
+FAIXAS = ["Livre", "7+", "10+", "12+", "14+", "16+", "18+"]
 
 PROMPT = """
 Analise a imagem da capa (ou lombada) de um livro.
@@ -73,6 +77,7 @@ CAMPOS = [
     "titulo",
     "volume",
     "autor",
+    "faixa_etaria",
     "titulo_google_books",
     "autor_google_books",
     "validado",
@@ -92,6 +97,10 @@ class Autor(BaseModel):
     autor: Optional[str] = None
 
 
+class FaixaEtaria(BaseModel):
+    faixa_etaria: Optional[str] = None
+
+
 PROMPT_AUTOR = """
 Esta é a capa (ou lombada) de um livro. Diga APENAS quem aparece como autor.
 
@@ -102,6 +111,22 @@ Regras:
 - Não use editora, tradutor ou ilustrador.
 - Se realmente não houver nenhum nome de autoria visível, use null.
 - Responda somente em JSON válido: {"autor": "string ou null"}
+"""
+
+PROMPT_FAIXA = """
+Livro: "{titulo}"{autor_txt}.
+
+Indique a faixa etária indicativa de leitura (público-alvo), considerando
+temas, violência, conteúdo sexual, vocabulário e complexidade.
+
+Escolha EXATAMENTE um destes valores: Livre, 7+, 10+, 12+, 14+, 16+, 18+.
+
+Regras:
+- Baseie-se na obra real. Se você não conhece este livro com segurança,
+  use null. Não chute.
+- Obras infantis ilustradas: Livre ou 7+. Infantojuvenil: 10+ a 14+.
+  Conteúdo adulto explícito: 18+.
+- Responda somente em JSON válido: {{"faixa_etaria": "valor ou null"}}
 """
 
 
@@ -181,6 +206,7 @@ def resultado_vazio(arquivo, erro):
         "titulo": None,
         "volume": None,
         "autor": None,
+        "faixa_etaria": None,
         "titulo_google_books": None,
         "autor_google_books": None,
         "validado": False,
@@ -270,6 +296,50 @@ def ler_autor(path, mime):
     except Exception as erro:
         print(f"  Segunda leitura do autor falhou: {erro}")
         return None
+
+
+def ler_faixa_etaria(titulo, autor=None):
+    """Chamada só de texto. Retorna uma das FAIXAS ou None."""
+    if not titulo or client is None:
+        return None
+
+    autor_txt = f", de {autor}" if autor else ""
+    prompt = PROMPT_FAIXA.format(titulo=titulo, autor_txt=autor_txt)
+
+    for tentativa in range(1, TENTATIVAS + 1):
+        try:
+            resposta = client.models.generate_content(
+                model=MODELO_FAIXA,
+                contents=[prompt],
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=FaixaEtaria,
+                    temperature=0,
+                ),
+            )
+            dados = json.loads(getattr(resposta, "text", None) or "{}")
+            valor = (
+                texto_seguro(dados.get("faixa_etaria"))
+                if isinstance(dados, dict)
+                else None
+            )
+            if not valor:
+                return None
+            valor = valor.replace(" ", "")
+            return valor if valor in FAIXAS else None
+        except genai_errors.APIError as erro:
+            codigo = getattr(erro, "code", None)
+            if codigo in CODIGOS_RETENTAVEIS and tentativa < TENTATIVAS:
+                espera = 2**tentativa
+                print(f"  API retornou {codigo}; nova tentativa em {espera}s...")
+                time.sleep(espera)
+                continue
+            print(f"  Faixa etária falhou: {erro}")
+            return None
+        except Exception as erro:
+            print(f"  Faixa etária falhou: {erro}")
+            return None
+    return None
 
 
 def ler_capa(path):
@@ -506,9 +576,18 @@ def processar_imagem(path):
         dados["arquivo"] = path.name
         dados = validar(dados)
 
+        # Título/autor canônicos do Google Books têm prioridade quando validado.
+        titulo_faixa = (
+            dados.get("titulo_google_books") if dados["validado"] else None
+        ) or dados.get("titulo")
+        autor_faixa = (
+            dados.get("autor_google_books") if dados["validado"] else None
+        ) or dados.get("autor")
+        dados["faixa_etaria"] = ler_faixa_etaria(titulo_faixa, autor_faixa)
+
         print(
             f"  Lido: {dados.get('titulo')!r} | vol {dados.get('volume')!r} "
-            f"| {dados.get('autor')!r}"
+            f"| {dados.get('autor')!r} | faixa {dados.get('faixa_etaria')!r}"
         )
         if dados.get("erro"):
             print(f"  Erro: {dados['erro']}")
@@ -604,10 +683,12 @@ def main():
 
     confirmados = sum(1 for r in registros if r["validado"])
     erros = sum(1 for r in registros if r["erro"])
+    com_faixa = sum(1 for r in registros if r.get("faixa_etaria"))
 
     print("\n========== RESULTADO ==========")
     print(f"Imagens processadas: {len(registros)}")
     print(f"Correspondências encontradas: {confirmados}")
+    print(f"Faixa etária preenchida: {com_faixa}")
     print(f"Registros com erros: {erros}")
     print(f"Planilha criada: {ARQUIVO_EXCEL}")
 
