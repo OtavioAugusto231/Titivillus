@@ -32,6 +32,7 @@ client = genai.Client(api_key=API_KEY) if API_KEY else None
 # Recomendado: sem chave a cota anônima do Google Books costuma dar 429.
 # Crie em console.cloud.google.com (API "Books API") e exporte GOOGLE_BOOKS_API_KEY.
 GOOGLE_BOOKS_KEY = os.environ.get("GOOGLE_BOOKS_API_KEY", "").strip()
+_google_books_bloqueado = False
 
 EXTENSOES = {
     ".jpg": "image/jpeg",
@@ -51,23 +52,31 @@ PROMPT = """
 Analise a imagem da capa (ou lombada) de um livro.
 
 Identifique:
-- titulo: título do livro;
+- titulo: título da obra/série, SEM o número do volume;
+- volume: número do volume/tomo/edição na série (apenas o número, ex.: "12").
+  Procure na capa e na lombada: "Vol. 3", "nº 7", "Tomo 2", numeral grande
+  isolado ou na lateral. Livros avulsos não têm volume;
 - autor: nome do autor.
 
 Regras:
 - Não invente informações.
-- Se não conseguir identificar um campo, use null.
+- Se não conseguir identificar um campo, use null. Em especial, só informe
+  volume se o número estiver legível; na dúvida, use null.
 - Não confunda editora, tradutor ou ilustrador com o autor.
+- O autor pode ser pseudônimo, nome artístico ou nome de canal/youtuber/marca
+  impresso na capa. Se um nome aparece como autoria, preencha o campo autor.
 - Responda somente em JSON válido:
-  {"titulo": "string ou null", "autor": "string ou null"}
+  {"titulo": "string ou null", "volume": "string ou null", "autor": "string ou null"}
 """
 
 CAMPOS = [
     "titulo",
+    "volume",
     "autor",
     "titulo_google_books",
     "autor_google_books",
     "validado",
+    "fonte_validacao",
     "arquivo",
     "erro",
 ]
@@ -75,7 +84,25 @@ CAMPOS = [
 
 class Capa(BaseModel):
     titulo: Optional[str] = None
+    volume: Optional[str] = None
     autor: Optional[str] = None
+
+
+class Autor(BaseModel):
+    autor: Optional[str] = None
+
+
+PROMPT_AUTOR = """
+Esta é a capa (ou lombada) de um livro. Diga APENAS quem aparece como autor.
+
+Regras:
+- Aceite pseudônimos, nomes artísticos e nomes de canal/youtuber/marca quando
+  estiverem impressos como autoria (geralmente em destaque, perto do título).
+- Se houver mais de um autor, separe por vírgula.
+- Não use editora, tradutor ou ilustrador.
+- Se realmente não houver nenhum nome de autoria visível, use null.
+- Responda somente em JSON válido: {"autor": "string ou null"}
+"""
 
 
 # ============================================================
@@ -152,6 +179,7 @@ def limpar_nome(texto):
 def resultado_vazio(arquivo, erro):
     return {
         "titulo": None,
+        "volume": None,
         "autor": None,
         "titulo_google_books": None,
         "autor_google_books": None,
@@ -166,9 +194,12 @@ def resultado_vazio(arquivo, erro):
 # ============================================================
 
 
-def renomear_foto(path, titulo, autor):
+def renomear_foto(path, titulo, autor, volume=None):
     titulo = limpar_nome(titulo) or "Título desconhecido"
     autor = limpar_nome(autor) or "Autor desconhecido"
+    volume = limpar_nome(volume)
+    if volume:
+        titulo = f"{titulo} Vol {volume}"
 
     novo_nome = f"{titulo} - {autor}{path.suffix.lower()}"
     destino = path.with_name(novo_nome)
@@ -193,7 +224,7 @@ def renomear_foto(path, titulo, autor):
 # ============================================================
 
 
-def chamar_gemini(dados_imagem, mime):
+def chamar_gemini(dados_imagem, mime, prompt=PROMPT, schema=Capa):
     ultimo_erro = None
 
     for tentativa in range(1, TENTATIVAS + 1):
@@ -202,11 +233,11 @@ def chamar_gemini(dados_imagem, mime):
                 model=MODELO,
                 contents=[
                     types.Part.from_bytes(data=dados_imagem, mime_type=mime),
-                    PROMPT,
+                    prompt,
                 ],
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
-                    response_schema=Capa,
+                    response_schema=schema,
                     temperature=0,
                 ),
             )
@@ -228,6 +259,17 @@ def chamar_gemini(dados_imagem, mime):
             raise
 
     raise ultimo_erro  # pragma: no cover
+
+
+def ler_autor(path, mime):
+    """Segunda leitura focada só no autor, usada quando a primeira vem vazia."""
+    try:
+        resposta = chamar_gemini(path.read_bytes(), mime, PROMPT_AUTOR, Autor)
+        dados = json.loads(getattr(resposta, "text", None) or "{}")
+        return texto_seguro(dados.get("autor")) if isinstance(dados, dict) else None
+    except Exception as erro:
+        print(f"  Segunda leitura do autor falhou: {erro}")
+        return None
 
 
 def ler_capa(path):
@@ -259,9 +301,16 @@ def ler_capa(path):
             f"recebido {type(dados).__name__}."
         )
 
+    autor = texto_seguro(dados.get("autor"))
+    if not autor:
+        autor = ler_autor(path, mime)
+        if autor:
+            print(f"  Autor recuperado na segunda leitura: {autor!r}")
+
     return {
         "titulo": texto_seguro(dados.get("titulo")),
-        "autor": texto_seguro(dados.get("autor")),
+        "volume": texto_seguro(dados.get("volume")),
+        "autor": autor,
     }
 
 
@@ -271,6 +320,10 @@ def ler_capa(path):
 
 
 def buscar_google_books(consulta):
+    global _google_books_bloqueado
+    if _google_books_bloqueado:
+        raise requests.RequestException("pulado: cota excedida (429) nesta execução")
+
     params = {"q": consulta, "maxResults": 10, "printType": "books"}
     if GOOGLE_BOOKS_KEY:
         params["key"] = GOOGLE_BOOKS_KEY
@@ -290,10 +343,50 @@ def buscar_google_books(consulta):
             continue
         break
 
+    if resposta.status_code == 429:
+        _google_books_bloqueado = True
+
     resposta.raise_for_status()
     corpo = resposta.json()
     itens = corpo.get("items", []) if isinstance(corpo, dict) else []
     return itens if isinstance(itens, list) else []
+
+
+def buscar_open_library(titulo, autor):
+    """Fallback sem chave. Devolve itens no mesmo formato do Google Books."""
+    params = {"title": titulo, "limit": 10, "fields": "title,author_name"}
+    if autor:
+        params["author"] = autor
+
+    for tentativa in range(1, 3):
+        try:
+            resposta = requests.get(
+                "https://openlibrary.org/search.json",
+                params=params,
+                headers={"User-Agent": "Titivillus/1.0 (catalogador de livros)"},
+                timeout=40,
+            )
+            break
+        except (requests.Timeout, requests.ConnectionError):
+            if tentativa == 2:
+                raise
+            print("  Open Library lento; tentando de novo...")
+    resposta.raise_for_status()
+    corpo = resposta.json()
+    docs = corpo.get("docs", []) if isinstance(corpo, dict) else []
+
+    itens = []
+    for doc in docs if isinstance(docs, list) else []:
+        if isinstance(doc, dict):
+            itens.append(
+                {
+                    "volumeInfo": {
+                        "title": doc.get("title"),
+                        "authors": doc.get("author_name", []),
+                    }
+                }
+            )
+    return itens
 
 
 def escolher_melhor(itens, titulo, autor):
@@ -357,21 +450,44 @@ def validar(d):
         estrita += f' inauthor:"{autor}"'
     solta = f"{titulo} {autor}" if autor else titulo
 
-    try:
-        melhor = None
-        for consulta in (estrita, solta):
-            itens = buscar_google_books(consulta)
-            melhor = escolher_melhor(itens, titulo, autor)
-            if melhor:
-                break
-    except (requests.RequestException, ValueError) as erro:
-        d["erro"] = f"Falha no Google Books: {erro}"
-        return d
+    fontes = [
+        (
+            "Google Books",
+            lambda: [
+                item
+                for consulta in (estrita, solta)
+                for item in buscar_google_books(consulta)
+            ],
+        ),
+        ("Open Library", lambda: buscar_open_library(titulo, autor)),
+    ]
 
-    if melhor:
-        d["titulo_google_books"] = melhor["titulo"]
-        d["autor_google_books"] = melhor["autor"]
-        d["validado"] = True
+    falhas = []
+    consultou_alguma = False
+
+    for nome, buscar in fontes:
+        try:
+            itens = buscar()
+        except (requests.RequestException, ValueError) as erro:
+            falhas.append(f"{nome}: {erro}")
+            print(f"  {nome} indisponível, tentando próxima fonte...")
+            continue
+
+        consultou_alguma = True
+        melhor = escolher_melhor(itens, titulo, autor)
+        print(
+            f"  {nome}: {len(itens)} candidato(s), match={'sim' if melhor else 'não'}"
+        )
+        if melhor:
+            d["titulo_google_books"] = melhor["titulo"]
+            d["autor_google_books"] = melhor["autor"]
+            d["validado"] = True
+            d["fonte_validacao"] = nome
+            return d
+
+    # Só marca erro se NENHUMA fonte respondeu. Sem match com fonte ativa não é erro.
+    if not consultou_alguma and falhas:
+        d["erro"] = "Falha na validação: " + " | ".join(falhas)
 
     return d
 
@@ -390,7 +506,10 @@ def processar_imagem(path):
         dados["arquivo"] = path.name
         dados = validar(dados)
 
-        print(f"  Lido: {dados.get('titulo')!r} / {dados.get('autor')!r}")
+        print(
+            f"  Lido: {dados.get('titulo')!r} | vol {dados.get('volume')!r} "
+            f"| {dados.get('autor')!r}"
+        )
         if dados.get("erro"):
             print(f"  Erro: {dados['erro']}")
         elif dados["validado"]:
@@ -401,7 +520,10 @@ def processar_imagem(path):
         if dados["validado"] or not RENOMEAR_APENAS_VALIDADOS:
             if dados.get("titulo"):
                 dados["arquivo"] = renomear_foto(
-                    path, dados.get("titulo"), dados.get("autor")
+                    path,
+                    dados.get("titulo"),
+                    dados.get("autor"),
+                    dados.get("volume"),
                 )
 
         return dados
@@ -419,11 +541,21 @@ def processar_imagem(path):
 def exportar_excel(registros):
     df = pd.DataFrame(registros, columns=CAMPOS)
 
-    df["_ordem"] = df["titulo"].map(normalizar)
-    df["_sem_titulo"] = df["titulo"].map(lambda valor: not bool(texto_seguro(valor)))
+    def numero_volume(valor):
+        if isinstance(valor, str):
+            achado = re.search(r"\d+", valor)
+            if achado:
+                return int(achado.group())
+        return 0
 
-    df = df.sort_values(by=["_sem_titulo", "_ordem"], kind="stable").drop(
-        columns=["_sem_titulo", "_ordem"]
+    df["_ordem"] = df["titulo"].map(normalizar)
+    df["_sem_titulo"] = df["titulo"].map(
+        lambda valor: not (isinstance(valor, str) and valor.strip())
+    )
+    df["_vol"] = df["volume"].map(numero_volume)
+
+    df = df.sort_values(by=["_sem_titulo", "_ordem", "_vol"], kind="stable").drop(
+        columns=["_sem_titulo", "_ordem", "_vol"]
     )
 
     try:
