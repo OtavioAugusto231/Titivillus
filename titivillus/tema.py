@@ -187,6 +187,22 @@ def aplicar_tema(raiz):
             darkcolor=[("active", "#6a6a6a")],
         )
 
+    s.configure(
+        "TRadiobutton",
+        background=c["janela"],
+        foreground=c["fg"],
+        indicatorcolor=c["campo"],
+        indicatorbackground=c["campo"],
+        focuscolor=c["janela"],
+        padding=(2, 4),
+    )
+    s.map(
+        "TRadiobutton",
+        background=[("active", c["janela"]), ("disabled", c["janela"])],
+        foreground=[("disabled", c["fg_off"])],
+        indicatorcolor=[("selected", c["destaque"]), ("active", "#4a4a4a")],
+    )
+
     s.configure("TPanedwindow", background=c["janela"])
     s.configure("Sash", sashthickness=6, background=c["janela"])
     return familia

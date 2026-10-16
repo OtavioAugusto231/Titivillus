@@ -16,8 +16,8 @@ def _numero_volume(valor):
     return 0
 
 
-def exportar_excel(registros, caminho):
-    df = pd.DataFrame(registros, columns=CAMPOS)
+def exportar_excel(registros, caminho, campos=CAMPOS):
+    df = pd.DataFrame(registros, columns=campos)
 
     df["_ordem"] = df["titulo"].map(normalizar)
     df["_sem_titulo"] = df["titulo"].map(

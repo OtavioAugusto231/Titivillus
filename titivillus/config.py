@@ -24,8 +24,13 @@ carregar_env(BASE_DIR / ".env")
 
 PASTA_CAPAS = BASE_DIR / "capas"
 ARQUIVO_EXCEL = BASE_DIR / "livros.xlsx"
+PASTA_FICHAS = BASE_DIR / "fichas"
+ARQUIVO_EXCEL_FICHAS = BASE_DIR / "fichas.xlsx"
 
 MODELO = os.environ.get("GEMINI_MODEL", "gemini-3.1-flash-lite").strip()
+# Ficha catalográfica é texto miúdo e denso: dá pra usar um modelo mais forte
+# só nela com GEMINI_MODEL_FICHA no .env (padrão: o mesmo modelo das capas).
+MODELO_FICHA = os.environ.get("GEMINI_MODEL_FICHA", "").strip() or MODELO
 MODELO_FAIXA = os.environ.get("GEMINI_MODEL_FAIXA", "").strip() or MODELO
 MODELO_FAIXA_FALLBACK = os.environ.get(
     "GEMINI_MODEL_FAIXA_FALLBACK", "gemini-2.5-flash"
@@ -74,7 +79,11 @@ LIMIAR_PARCIAL = 0.92  # só título: sugere, mas NÃO valida nem renomeia
 
 FAIXAS = ["Livre", "7+", "10+", "12+", "14+", "16+", "18+"]
 
-# Quando renomear a foto
+# O que ler
+MODO_CAPA = "capa"
+MODO_FICHA = "ficha"
+
+# Quando renomear a foto (só no modo capa)
 MODO_VALIDADOS = "validados"
 MODO_VALIDADOS_E_INCONCLUSIVOS = "validados_inconclusivos"
 MODO_NUNCA = "nunca"
@@ -84,6 +93,9 @@ MODO_NUNCA = "nunca"
 class Settings:
     """Parâmetros de uma execução (a GUI preenche; o CLI usa os padrões)."""
 
+    modo: str = MODO_CAPA
     pasta_capas: pathlib.Path = PASTA_CAPAS
     arquivo_excel: pathlib.Path = ARQUIVO_EXCEL
+    pasta_fichas: pathlib.Path = PASTA_FICHAS
+    arquivo_excel_fichas: pathlib.Path = ARQUIVO_EXCEL_FICHAS
     modo_renomear: str = MODO_VALIDADOS_E_INCONCLUSIVOS

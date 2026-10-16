@@ -2,16 +2,22 @@
 Usado igualmente pelo CLI e pela GUI."""
 
 from .arquivos import renomear_foto
-from .config import EXTENSOES
-from .leitor_capa import ler_capa, ler_faixa_etaria
+from .config import EXTENSOES, MODO_FICHA
+from .leitor_capa import QuotaEsgotada, ler_capa, ler_faixa_etaria
+from .leitor_ficha import ler_ficha
 from .log import log
 from .modelos import (
+    CAMPOS,
+    CAMPOS_FICHA,
     STATUS_ERRO,
+    STATUS_FICHA_LIDA,
+    STATUS_FICHA_NAO_IDENTIFICADA,
     STATUS_INCONCLUSIVO,
     STATUS_PARCIAL,
     STATUS_POR_MODO,
     STATUS_VALIDADO,
     resultado_vazio,
+    resultado_vazio_ficha,
 )
 from .planilha import exportar_excel
 from .validacao import validar
@@ -82,9 +88,53 @@ def processar_imagem(path, modo_renomear):
 
         return dados
 
+    except QuotaEsgotada:
+        raise
     except Exception as erro:
         log(f"  Erro: {erro}")
         return resultado_vazio(path.name, f"Falha no processamento: {erro}")
+
+
+def processar_ficha(path):
+    log(f"\nProcessando ficha: {path.name}")
+
+    if not path.exists():
+        msg = "Arquivo não existe mais (renomeado ou movido depois da listagem)."
+        log(f"  Pulado: {msg}")
+        return resultado_vazio_ficha(path.name, msg)
+
+    try:
+        dados = ler_ficha(path)
+        dados["arquivo"] = path.name
+        dados["erro"] = None
+        identificada = bool(dados.get("titulo") or dados.get("isbn"))
+        dados["status"] = (
+            STATUS_FICHA_LIDA if identificada else STATUS_FICHA_NAO_IDENTIFICADA
+        )
+        log(
+            f"  Lido: {dados.get('titulo')!r} | {dados.get('autores')!r} | "
+            f"{dados.get('editora')!r} | {dados.get('ano_publicacao')!r} | "
+            f"ISBN {dados.get('isbn')!r}"
+        )
+        log(f"  Status: {dados['status']}")
+        return dados
+    except QuotaEsgotada:
+        raise
+    except Exception as erro:
+        log(f"  Erro: {erro}")
+        return resultado_vazio_ficha(path.name, f"Falha no processamento: {erro}")
+
+
+def resumo_fichas(registros):
+    return {
+        "processadas": len(registros),
+        "lidas": sum(1 for r in registros if r["status"] == STATUS_FICHA_LIDA),
+        "nao_identificadas": sum(
+            1 for r in registros if r["status"] == STATUS_FICHA_NAO_IDENTIFICADA
+        ),
+        "com_isbn": sum(1 for r in registros if r.get("isbn")),
+        "erros": sum(1 for r in registros if r["status"] == STATUS_ERRO),
+    }
 
 
 def resumo(registros):
@@ -109,16 +159,21 @@ def executar(settings, on_resultado=None, on_progresso=None, cancelar=None):
     cancelar: threading.Event; checado entre imagens.
     Retorna a lista de registros. Levanta RuntimeError se a planilha falhar.
     """
-    settings.pasta_capas.mkdir(parents=True, exist_ok=True)
-    imagens = listar_imagens(settings.pasta_capas)
+    ficha = settings.modo == MODO_FICHA
+    pasta = settings.pasta_fichas if ficha else settings.pasta_capas
+    arquivo_excel = settings.arquivo_excel_fichas if ficha else settings.arquivo_excel
+
+    pasta.mkdir(parents=True, exist_ok=True)
+    imagens = listar_imagens(pasta)
 
     if not imagens:
-        log(f"Nenhuma imagem encontrada em: {settings.pasta_capas}")
+        log(f"Nenhuma imagem encontrada em: {pasta}")
         log("Adicione arquivos JPG, JPEG, PNG ou WEBP à pasta.")
         return []
 
     total = len(imagens)
     registros = []
+    erro_quota = None
     try:
         for i, imagem in enumerate(imagens):
             if cancelar is not None and cancelar.is_set():
@@ -126,17 +181,34 @@ def executar(settings, on_resultado=None, on_progresso=None, cancelar=None):
                 break
             if on_progresso:
                 on_progresso(i, total, imagem.name)
-            registro = processar_imagem(imagem, settings.modo_renomear)
+            if ficha:
+                registro = processar_ficha(imagem)
+            else:
+                registro = processar_imagem(imagem, settings.modo_renomear)
             registros.append(registro)
             if on_resultado:
                 on_resultado(registro)
             if on_progresso:
                 on_progresso(i + 1, total, None)
+    except QuotaEsgotada as erro:
+        erro_quota = erro
+        log(f"\n{erro}")
+        log("Exportando o que já foi processado...")
     except KeyboardInterrupt:
         log("\nInterrompido. Exportando o que já foi processado...")
 
     if registros:
-        exportar_excel(registros, settings.arquivo_excel)
-        log(f"\nPlanilha criada: {settings.arquivo_excel}")
+        exportar_excel(
+            registros, arquivo_excel, CAMPOS_FICHA if ficha else CAMPOS
+        )
+        log(f"\nPlanilha criada: {arquivo_excel}")
+
+    if erro_quota is not None:
+        salvo = (
+            f"\n\nJá processado: {len(registros)} de {total}; salvo em {arquivo_excel}."
+            if registros
+            else ""
+        )
+        raise QuotaEsgotada(f"{erro_quota}{salvo}")
 
     return registros

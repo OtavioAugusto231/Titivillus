@@ -1,6 +1,7 @@
 """Reconhecimento da capa e faixa etária via Gemini."""
 
 import json
+import re
 import time
 
 from google.genai import errors as genai_errors
@@ -20,6 +21,24 @@ from .log import log
 from .modelos import Autor, Capa, FaixaEtaria
 from .prompts import PROMPT, PROMPT_AUTOR, PROMPT_FAIXA
 from .textos import texto_seguro
+
+
+class QuotaEsgotada(RuntimeError):
+    """Cota diária do Gemini esgotada: repetir não adianta, o run deve parar."""
+
+
+def _mensagem_quota(modelo, erro):
+    espera = re.search(r"retry in (?:(\d+)h)?(?:(\d+)m)?[\d.]+s", str(erro))
+    quando = ""
+    if espera and (espera.group(1) or espera.group(2)):
+        horas, minutos = espera.group(1), espera.group(2)
+        quando = " em ~" + (f"{horas}h" if horas else "") + (f"{minutos}min" if minutos else "")
+    return (
+        f"Cota diária do Gemini esgotada para o modelo '{modelo}'. "
+        f"Ela volta{quando or ' depois de algumas horas'}. Alternativas: definir "
+        "GEMINI_MODEL no .env com outro modelo (a cota é por modelo) ou usar "
+        "outra chave/plano pago."
+    )
 
 
 def gerar_com_retry(modelo, contents, schema):
@@ -45,6 +64,9 @@ def gerar_com_retry(modelo, contents, schema):
                     "client.models.list() e defina GEMINI_MODEL com o ID exato."
                 ) from erro
 
+            if codigo == 429 and "PerDay" in str(erro):
+                raise QuotaEsgotada(_mensagem_quota(modelo, erro)) from erro
+
             if codigo in CODIGOS_RETENTAVEIS and tentativa < len(ESPERAS_GEMINI):
                 espera = ESPERAS_GEMINI[tentativa]
                 log(f"  API retornou {codigo}; nova tentativa em {espera}s...")
@@ -53,9 +75,9 @@ def gerar_com_retry(modelo, contents, schema):
             raise
 
 
-def chamar_gemini(dados_imagem, mime, prompt=PROMPT, schema=Capa):
+def chamar_gemini(dados_imagem, mime, prompt=PROMPT, schema=Capa, modelo=None):
     return gerar_com_retry(
-        MODELO,
+        modelo or MODELO,
         [types.Part.from_bytes(data=dados_imagem, mime_type=mime), prompt],
         schema,
     )
@@ -67,6 +89,8 @@ def ler_autor(path, mime):
         resposta = chamar_gemini(path.read_bytes(), mime, PROMPT_AUTOR, Autor)
         dados = json.loads(getattr(resposta, "text", None) or "{}")
         return texto_seguro(dados.get("autor")) if isinstance(dados, dict) else None
+    except QuotaEsgotada:
+        raise
     except Exception as erro:
         log(f"  Segunda leitura do autor falhou: {erro}")
         return None
@@ -108,18 +132,8 @@ def ler_faixa_etaria(titulo, autor=None):
     return None
 
 
-def ler_capa(path):
-    if get_client() is None:
-        raise RuntimeError(
-            "Chave Gemini ausente. Defina GEMINI_API_KEY (ambiente ou .env)."
-        )
-
-    mime = EXTENSOES.get(path.suffix.lower())
-    if mime is None:
-        raise ValueError("Formato de imagem não suportado.")
-
-    resposta = chamar_gemini(path.read_bytes(), mime)
-
+def json_da_resposta(resposta):
+    """Extrai o objeto JSON de uma resposta do Gemini ou levanta ValueError."""
     texto_resposta = getattr(resposta, "text", None)
     if not texto_resposta:
         raise ValueError("O Gemini retornou uma resposta vazia.")
@@ -136,6 +150,20 @@ def ler_capa(path):
             f"Formato inesperado do Gemini: esperado objeto JSON, "
             f"recebido {type(dados).__name__}."
         )
+    return dados
+
+
+def ler_capa(path):
+    if get_client() is None:
+        raise RuntimeError(
+            "Chave Gemini ausente. Defina GEMINI_API_KEY (ambiente ou .env)."
+        )
+
+    mime = EXTENSOES.get(path.suffix.lower())
+    if mime is None:
+        raise ValueError("Formato de imagem não suportado.")
+
+    dados = json_da_resposta(chamar_gemini(path.read_bytes(), mime))
 
     autor = texto_seguro(dados.get("autor"))
     if not autor:

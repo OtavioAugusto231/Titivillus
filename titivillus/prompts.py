@@ -50,3 +50,44 @@ Regras:
   Conteúdo adulto explícito: 18+.
 - Responda somente em JSON válido: {{"faixa_etaria": "valor ou null"}}
 """
+
+PROMPT_FICHA = """
+Esta imagem é a página de créditos de um livro: normalmente traz a ficha
+catalográfica (CIP - Catalogação na Publicação) e os dados da edição.
+Extraia todas as informações legíveis.
+
+Campos:
+- titulo: título principal, sem subtítulo e sem número de volume;
+- subtitulo;
+- titulo_original: título no idioma original (comum em traduções:
+  "Título original: ...");
+- autores: lista, um item por autor, como impresso (a ficha costuma trazer
+  "Sobrenome, Nome");
+- tradutor, ilustrador, organizador: nome(s), separados por vírgula;
+- editora;
+- cidade: cidade da publicação;
+- ano_publicacao: só o ano da edição/publicação; se houver copyright de outro
+  ano, registre-o em outras_informacoes;
+- edicao: ex.: "2. ed.", "1ª edição";
+- isbn: como impresso, com hífens; se houver mais de um (impresso, e-book),
+  separe por "; ";
+- paginas: número de páginas (ex.: "320 p." -> "320");
+- serie_colecao e volume (número na série);
+- idioma;
+- cdd, cdu: apenas o código de classificação;
+- assuntos: lista, um item por assunto catalogado, sem a numeração "1.", "2.";
+- bibliotecario_crb: nome e registro CRB, se houver;
+- ficha_catalografica: transcrição literal do bloco da ficha (do cabeçalho
+  "Dados Internacionais de Catalogação..." até o CDD/CDU/CRB), preservando as
+  quebras de linha;
+- outras_informacoes: demais textos legíveis da página (copyright, créditos de
+  revisão/capa/diagramação, endereço da editora, gráfica, etc.), em texto
+  corrido.
+
+Regras:
+- Não invente nem complete informação. Campo ausente ou ilegível: null.
+- Transcreva letra por letra e dígito por dígito, principalmente ISBN, ano,
+  CDD e CRB.
+- Não confunda título original com o título da edição, nem editora com gráfica.
+- Responda somente em JSON válido, com exatamente estes campos.
+"""
