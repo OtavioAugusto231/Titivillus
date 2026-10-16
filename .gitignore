@@ -3,7 +3,7 @@ capas/
 *.xlsx
 *.xls
 *.xlsm
-
+*.txt
 # Ignorar arquivos temporários do Excel
 ~$*.xlsx
 ~$*.xls
