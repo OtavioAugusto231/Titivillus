@@ -1,212 +1,253 @@
-# Titivillus
+# Titivillus — Aplicativo Desktop
 
-Catalogador de livros a partir de fotos. Você joga as imagens numa pasta, abre a interface (ou roda o CLI) e recebe uma planilha `.xlsx`.
+Aplicativo desktop para catalogação de livros a partir de imagens de capas e fichas bibliográficas. O projeto utiliza Python para o processamento dos dados, FastAPI para a API local e Tauri para exibir a interface desenvolvida com HTML, CSS e JavaScript.
 
-Dois modos de leitura:
+## Tecnologias
 
-- **Capa**: extrai título, volume, autor e faixa etária da capa ou lombada, confere o resultado no Google Books (com Open Library de reserva) e, opcionalmente, renomeia a foto.
-- **Ficha catalográfica**: lê a página de créditos e extrai todos os dados da edição (editora, ano, ISBN, CDD/CDU, assuntos, etc.).
+- **Python:** lógica de processamento e validação bibliográfica.
+- **FastAPI e Uvicorn:** API HTTP local.
+- **HTML, CSS e JavaScript:** interface gráfica.
+- **Tauri e Rust:** aplicação desktop.
+- **Pandas e OpenPyXL:** manipulação de planilhas Excel.
+- **Google Gemini:** apoio à leitura de imagens.
+- **Google Books e Open Library:** consulta e validação de informações bibliográficas.
 
-Feito pra catalogar acervo sem digitar nada na mão.
+## Arquitetura
 
-## Como funciona
+```text
+Titivillus Desktop
+├── Tauri / Rust
+├── Frontend
+│   └── HTML, CSS e JavaScript
+└── Backend Python
+    └── FastAPI / Uvicorn
+        ├── Leitura de imagens
+        ├── Identificação de livros
+        ├── Validação bibliográfica
+        └── Exportação para Excel
+```
 
-### Modo capa
+O frontend se comunica com o backend por meio de uma API HTTP local. O Tauri fornece a janela desktop, enquanto o processamento continua sendo realizado pelo Python.
 
-1. Lê as imagens da pasta `capas/` (JPG, JPEG, PNG e WEBP, só o nível raiz da pasta, sem subpastas).
-2. Manda cada imagem ao Gemini, que devolve `titulo`, `volume` e `autor`. Se o autor vier vazio, faz uma segunda leitura focada só nele.
-3. Valida o resultado em fontes externas, na ordem:
-   1. **Google Books**: consulta estrita (`intitle:"..." inauthor:"..."`) e, se não casar, uma consulta solta.
-   2. **Open Library**: usada se o Google Books não casar ou estiver fora do ar.
-4. Pede ao Gemini a **faixa etária** (chamada só de texto, usando o título canônico quando o livro foi validado).
-5. Renomeia a foto conforme o modo escolhido (ver [Renomeação](#renomeação-das-fotos)).
-6. Grava tudo em `livros.xlsx`.
+## Estrutura do projeto
 
-O passo 3 existe porque modelo de visão erra: fonte decorativa, lombada cortada, foto torta. Sem validação a planilha sai com título inventado.
+```text
+Titivillus_Tauri_FastAPI/
+├── capas/                  # Imagens das capas
+├── fichas/                 # Imagens das fichas bibliográficas
+├── frontend/               # Interface HTML, CSS e JavaScript
+├── src-tauri/              # Configuração e código Rust do Tauri
+├── scripts/                # Scripts auxiliares
+├── tests/                  # Testes automatizados
+├── titivillus/             # Backend e lógica Python
+├── .venv/                  # Ambiente virtual Python
+├── .env                    # Configurações e chaves locais
+├── iniciar_titivillus.sh   # Script de inicialização
+├── package.json            # Scripts e dependências Node.js
+├── requirements.txt        # Dependências Python
+├── livros.xlsx             # Planilha de livros
+└── fichas.xlsx             # Planilha de fichas
+```
 
-**Critérios de match** (comparação fuzzy, sem acento e sem diferença de caixa; ajustáveis em `titivillus/config.py`):
-
-| Situação | Limiar | Resultado |
-|---|---|---|
-| Título e autor lidos | título ≥ 0,70 e autor ≥ 0,65 | `validado` |
-| Só título lido | título ≥ 0,85 | `validado` |
-| Título quase idêntico, autor divergente ou ausente na fonte | título ≥ 0,92 | `parcial`: apenas sugestão, nunca valida nem renomeia |
-
-### Modo ficha
-
-Lê a página de créditos com o Gemini e grava todos os campos legíveis. Não há validação externa, faixa etária nem renomeação. Listas (autores, assuntos) viram `a; b; c` na célula. Campo ausente ou ilegível fica vazio; o modelo é instruído a não completar nada.
-
-Como é texto miúdo e denso, vale usar um modelo mais forte só para este modo (`GEMINI_MODEL_FICHA`).
+A estrutura pode variar conforme a configuração local. Preserve as pastas de imagens e as planilhas que contenham dados importantes.
 
 ## Requisitos
 
-- Python 3.10 ou superior
-- tkinter (para a interface gráfica). No Debian/Ubuntu: `sudo apt install python3-tk`
-- Chave de API do Gemini
-- Chave da Google Books API (opcional, mas recomendada; ver [Limitações](#limitações))
-- Fotos nítidas, uma por livro, com a capa (ou a página de créditos) inteira visível
+- Python 3 e suporte a ambientes virtuais (`venv`).
+- Node.js e npm.
+- Rust e Cargo.
+- Dependências nativas necessárias para compilar o Tauri.
+- Conexão com a internet para serviços bibliográficos e modelos externos.
+
+No Linux, instale as ferramentas e bibliotecas de sistema exigidas pela versão do Tauri utilizada pelo projeto.
 
 ## Instalação
 
-```bash
-git clone <url-do-repositorio> Titivillus
-cd Titivillus
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-```
-
-Dependências: `google-genai`, `pandas`, `openpyxl`, `requests`, `pydantic`.
-
-## Configuração
-
-Copie o exemplo e preencha:
+Entre na pasta do projeto:
 
 ```bash
-cp .env.example .env
+cd ~/Documentos/titivillus_app/Titivillus_Tauri_FastAPI
 ```
 
-O `.env` fica na raiz do projeto (ao lado da pasta `titivillus/`). Variáveis já exportadas no shell têm prioridade sobre o `.env`. A chave nunca vai no código. **Não versione o `.env`.**
-
-| Variável | Obrigatória | Padrão | Função |
-|---|---|---|---|
-| `GEMINI_API_KEY` | sim | — | Chave da API do Gemini |
-| `GOOGLE_BOOKS_API_KEY` | não | — | Chave do Google Books. Sem ela a cota anônima estoura (429) quase sempre |
-| `GEMINI_MODEL` | não | `gemini-3.1-flash-lite` | Modelo usado para ler capas |
-| `GEMINI_MODEL_FICHA` | não | o mesmo de `GEMINI_MODEL` | Modelo usado só nas fichas |
-| `GEMINI_MODEL_FAIXA` | não | o mesmo de `GEMINI_MODEL` | Modelo usado para a faixa etária |
-| `GEMINI_MODEL_FAIXA_FALLBACK` | não | `gemini-2.5-flash` | Modelo tentado se o da faixa etária falhar |
-
-A cota diária do Gemini é **por modelo**. Se estourar, trocar `GEMINI_MODEL` resolve sem trocar de chave.
-
-Para criar a chave do Google Books: console.cloud.google.com, ative a "Books API" no projeto e gere uma chave de API.
-
-## Uso
-
-### Interface gráfica
+Crie o ambiente virtual Python, caso ainda não exista:
 
 ```bash
-python -m titivillus
+python3 -m venv .venv
 ```
 
-- Escolha o modo (capa ou ficha), a pasta de entrada e o arquivo `.xlsx` de saída.
-- Escolha a política de renomeação (só no modo capa).
-- **Iniciar** processa a pasta; **Parar** interrompe após a imagem atual e exporta o que já foi lido.
-- A tabela mostra cada imagem conforme é processada, colorida por status. Duplo clique numa linha abre todos os campos do registro.
-- **Abrir pasta** e **Abrir planilha** chamam o aplicativo padrão do sistema.
-- Se a planilha de saída já existir, a interface pede confirmação antes de sobrescrever.
-
-### Linha de comando
-
-Rode a partir da raiz do projeto:
+Instale as dependências Python:
 
 ```bash
-python -m titivillus.cli          # capas (padrão)
-python -m titivillus.cli ficha    # fichas catalográficas
+.venv/bin/python -m pip install --upgrade pip
+.venv/bin/python -m pip install -r requirements.txt
 ```
 
-O CLI usa sempre as pastas e planilhas padrão e a renomeação padrão (`validados + inconclusivos`). Não há flag para desligar a renomeação nem confirmação antes de sobrescrever a planilha; para isso, use a interface gráfica.
+Instale as dependências do frontend:
 
-### Pastas e arquivos padrão
+```bash
+npm install
+```
 
-| Modo | Entrada | Saída |
+### Configuração das credenciais
+
+Configure no arquivo `.env` as variáveis esperadas pelo backend, incluindo `GEMINI_API_KEY` quando necessário.
+
+Não publique o arquivo `.env` nem suas chaves de API no GitHub. Se existir um `.env.example`, utilize-o como referência para criar a configuração local.
+
+Verifique se as pastas `capas/` e `fichas/` existem e se o usuário possui permissão de leitura. O usuário também precisa ter permissão para gravar nas planilhas de saída.
+
+## Executar em modo de desenvolvimento
+
+Na raiz do projeto, execute:
+
+```bash
+./iniciar_titivillus.sh
+```
+
+O script ativa o ambiente Python, verifica se a API local está respondendo na porta `8000`, inicia o backend quando necessário e executa a interface Tauri em modo de desenvolvimento.
+
+Mantenha o terminal aberto durante a execução.
+
+Para iniciar apenas o backend manualmente:
+
+```bash
+.venv/bin/python -m uvicorn titivillus.api:app --host 127.0.0.1 --port 8000
+```
+
+A URL base utilizada pelo frontend deve ser:
+
+```text
+http://127.0.0.1:8000/api
+```
+
+A porta `1420` é utilizada pelo servidor de desenvolvimento do frontend. Evite iniciar várias instâncias do aplicativo simultaneamente.
+
+## API local
+
+| Método | Endpoint | Descrição |
 |---|---|---|
-| Capa | `capas/` | `livros.xlsx` |
-| Ficha | `fichas/` | `fichas.xlsx` |
+| `GET` | `/api/health` | Verifica se a API está funcionando. |
+| `GET` | `/api/settings` | Retorna configurações e caminhos utilizados. |
+| `GET` | `/api/files?mode=capa` | Lista arquivos de capas. |
+| `GET` | `/api/files?mode=ficha` | Lista arquivos de fichas. |
+| `GET` | `/api/state` | Consulta o estado do processamento. |
+| `GET` | `/api/records/fields?mode=...` | Consulta os campos de registros do modo solicitado. |
+| `POST` | `/api/run` | Inicia um processamento com os parâmetros enviados. |
+| `POST` | `/api/stop` | Solicita a interrupção do processamento. |
 
-As pastas são criadas automaticamente se não existirem. A planilha só é gravada se pelo menos uma imagem foi processada. Se ela estiver aberta no Excel/LibreOffice, a gravação falha com mensagem clara: feche e rode de novo.
+### Verificar o backend
 
-## Planilhas geradas
-
-Ordenação: título (sem acento e sem diferença de caixa), depois número do volume. Linhas sem título vão para o fim.
-
-### `livros.xlsx`
-
-| Coluna | Conteúdo |
-|---|---|
-| `titulo`, `volume`, `autor` | O que o Gemini leu da capa |
-| `faixa_etaria` | `Livre`, `7+`, `10+`, `12+`, `14+`, `16+` ou `18+`; vazio se o modelo não souber |
-| `titulo_google_books`, `autor_google_books` | Título e autor canônicos da fonte que validou (ou sugeriu). **Atenção:** o nome da coluna é histórico; quando a fonte é a Open Library, os dados dela vão aqui também |
-| `validado` | `True` só no status `validado` |
-| `status` | Ver tabela abaixo |
-| `fonte_validacao` | `Google Books`, `Open Library` ou `<fonte> (só título)` nos parciais |
-| `arquivo` | Nome final da foto (já renomeada, se for o caso) |
-| `erro` | Falha de processamento ou fonte que não respondeu |
-
-| Status | Significado | Ação |
-|---|---|---|
-| `validado` | Título e autor batem com uma fonte | Nenhuma |
-| `parcial (conferir autor)` | Título quase idêntico, autor divergente | Conferir o autor à mão |
-| `sem correspondência` | As fontes responderam e nada bateu | Conferir a linha (livro raro, leitura errada ou fora de catálogo) |
-| `inconclusivo (fonte indisponível)` | Nenhum match, nenhuma sugestão parcial e pelo menos uma fonte falhou | Rodar de novo depois ou conferir à mão |
-| `erro` | Falha ao processar a imagem | Ver coluna `erro` |
-
-### `fichas.xlsx`
-
-`arquivo`, `titulo`, `subtitulo`, `titulo_original`, `autores`, `tradutor`, `ilustrador`, `organizador`, `editora`, `cidade`, `ano_publicacao`, `edicao`, `isbn`, `paginas`, `serie_colecao`, `volume`, `idioma`, `cdd`, `cdu`, `assuntos`, `bibliotecario_crb`, `ficha_catalografica` (transcrição literal do bloco), `outras_informacoes`, `status`, `erro`.
-
-Status: `lida` (achou título ou ISBN), `ficha não identificada` (nenhum dos dois) e `erro`.
-
-## Renomeação das fotos
-
-Só no modo capa. O padrão é `Título Vol N - autor em minúsculas.ext`. Caracteres proibidos em nome de arquivo são removidos, cada parte é cortada em 80 caracteres e colisões ganham sufixo ` (2)`, ` (3)`...
-
-| Política | Renomeia quando o status é |
-|---|---|
-| Só validados | `validado` |
-| Validados + inconclusivos (**padrão**) | `validado` ou `inconclusivo` |
-| Não renomear | nunca |
-
-Pontos que importam:
-
-- A renomeação **altera os arquivos originais** na pasta de entrada. Faça backup do lote ou escolha "Não renomear" na primeira execução.
-- O nome usa o título e o autor **como o Gemini leu**, não os da fonte. Em `inconclusivo` isso significa renomear com uma leitura que ninguém conferiu.
-- `parcial` e `sem correspondência` nunca renomeiam.
-
-## Estrutura
-
-```
-Titivillus/
-├── titivillus/
-│   ├── __main__.py       # abre a interface (python -m titivillus)
-│   ├── cli.py            # linha de comando
-│   ├── gui.py            # interface tkinter
-│   ├── tema.py           # tema escuro (paleta libadwaita)
-│   ├── config.py         # .env, modelos, limiares, constantes
-│   ├── pipeline.py       # orquestra o lote e exporta a planilha
-│   ├── leitor_capa.py    # Gemini: capa, autor, faixa etária, retry e cota
-│   ├── leitor_ficha.py   # Gemini: ficha catalográfica
-│   ├── prompts.py        # prompts enviados ao Gemini
-│   ├── modelos.py        # schemas, campos e status
-│   ├── validacao.py      # Google Books → Open Library → sugestão parcial
-│   ├── fontes.py         # clientes das APIs, throttle, backoff, cooldown
-│   ├── matching.py       # comparação fuzzy entre leitura e candidatos
-│   ├── planilha.py       # ordenação e exportação .xlsx
-│   ├── arquivos.py       # renomeação das fotos
-│   ├── textos.py         # normalização e similaridade
-│   └── log.py            # log desacoplado (CLI imprime, GUI usa fila)
-├── capas/                # entrada: fotos de capas
-├── fichas/               # entrada: fotos de fichas catalográficas
-├── livros.xlsx           # saída do modo capa
-├── fichas.xlsx           # saída do modo ficha
-├── .env                  # chaves (não versionar)
-├── .env.example
-├── requirements.txt
-└── venv/
+```bash
+curl -fsS http://127.0.0.1:8000/api/health
+curl -fsS http://127.0.0.1:8000/api/settings
+curl -fsS 'http://127.0.0.1:8000/api/files?mode=capa'
+curl -fsS 'http://127.0.0.1:8000/api/files?mode=ficha'
 ```
 
-## Limitações
+## Processamento dos arquivos
 
-- A leitura depende da qualidade da foto. Reflexo, desfoque e capa parcial derrubam a taxa de acerto.
-- **Chamadas de API por imagem (capa):** 1 chamada de visão, mais 1 se o autor vier vazio, mais 1 de texto para a faixa etária (e outra se cair no modelo de fallback). Fora o Gemini, até 2 consultas ao Google Books e até 2 à Open Library. Em lote grande, acompanhe a cota.
-- **Cota diária do Gemini esgotada** (erro 429 "PerDay"): o processamento para, a planilha é gravada com o que já foi lido e a mensagem informa quantas imagens foram feitas. Erros 429/5xx transitórios têm 3 novas tentativas (5 s, 15 s, 30 s).
-- **Google Books sem chave:** 1 nova tentativa e, se continuar em 429, a fonte é pulada por 15 min (as imagens seguintes caem direto na Open Library). Com chave: 3 novas tentativas (5 s, 15 s, 40 s, respeitando `Retry-After`) e cooldown de 2 min. Intervalo mínimo de 1,2 s entre requisições.
-- Livros raros, edições antigas ou fora de catálogo podem não aparecer em nenhuma das fontes. Confira à mão as linhas `sem correspondência`, `parcial` e `inconclusivo`.
-- A faixa etária é uma estimativa do modelo a partir de título e autor, não uma classificação oficial. Quando o modelo não conhece a obra, o campo fica vazio.
-- Fichas não passam por nenhuma validação externa: ISBN, ano e CDD vêm só da leitura da imagem. Confira os dígitos.
-- O processamento é sequencial, uma imagem por vez.
-- As imagens são enviadas à API do Gemini; título e autor lidos vão para Google Books e Open Library. Não use com material que não possa sair da máquina.
+1. Coloque as imagens de capas em `capas/`.
+2. Coloque as imagens de fichas bibliográficas em `fichas/`.
+3. Confira a qualidade das imagens e a configuração dos diretórios.
+4. Execute o processamento pela interface.
+5. Revise os resultados e as planilhas geradas.
 
-## Nome
+As planilhas normalmente utilizadas são `livros.xlsx` e `fichas.xlsx`. Os caminhos efetivamente configurados podem ser consultados no endpoint `/api/settings`.
 
-Titivillus é o demônio que, segundo a tradição medieval, plantava erros nos manuscritos copiados pelos escribas. Aqui ele trabalha ao contrário: Google Books e Open Library existem pra pegar os erros dele.
+Antes de processar novamente um lote, confira os resultados existentes e mantenha cópias de segurança dos dados importantes.
+
+## Testes
+
+Execute os testes disponíveis:
+
+```bash
+.venv/bin/python -m pytest
+```
+
+Caso o `pytest` não esteja instalado, instale-o no ambiente virtual se ele fizer parte das dependências de desenvolvimento do projeto.
+
+## Compilar o aplicativo
+
+Para gerar a versão de distribuição:
+
+```bash
+npm run tauri build
+```
+
+O Tauri gera os artefatos conforme a configuração em `src-tauri/tauri.conf.json` e as ferramentas disponíveis no sistema.
+
+**Importante:** compilar o Tauri não garante automaticamente que o backend Python e todas as suas dependências serão empacotados junto. Antes de distribuir o aplicativo em outro computador, verifique a configuração de empacotamento do backend.
+
+## Solução de problemas
+
+### Erro `EADDRINUSE` na porta `1420`
+
+Esse erro indica que outro processo já está usando a porta do servidor de desenvolvimento.
+
+Identifique os processos:
+
+```bash
+ss -ltnp | grep -E ':1420|:8000|:8765'
+pgrep -af 'vite|dev-server.mjs|tauri dev|uvicorn'
+```
+
+Encerre apenas os processos antigos pertencentes ao Titivillus. Evite `killall node`, pois ele pode fechar outros aplicativos.
+
+### A interface não encontra as imagens
+
+Confira se o backend lista os arquivos:
+
+```bash
+curl -fsS 'http://127.0.0.1:8000/api/files?mode=capa'
+curl -fsS 'http://127.0.0.1:8000/api/files?mode=ficha'
+```
+
+Confira também:
+
+- Se `frontend/app.js` utiliza `http://127.0.0.1:8000/api`.
+- Se os caminhos retornados por `/api/settings` estão corretos.
+- Se os diretórios existem e podem ser lidos pelo usuário.
+- Se a interface consegue interpretar os dados retornados pela API.
+
+Se a API encontra as imagens, mas elas não aparecem na janela, investigue a renderização no frontend.
+
+### O backend não inicia
+
+Verifique as dependências e a porta:
+
+```bash
+.venv/bin/python -m pip check
+ss -ltnp | grep ':8000'
+```
+
+Se a porta já estiver ocupada, identifique o processo antes de encerrá-lo.
+
+### Erros de credenciais ou serviços externos
+
+Confira as variáveis de ambiente e a conexão com os serviços utilizados. Não compartilhe chaves de API em logs públicos, capturas de tela ou no repositório.
+
+## Segurança e versionamento
+
+Não versione arquivos de credenciais, o ambiente virtual ou dependências instaladas localmente.
+
+Confira se o `.gitignore` exclui, conforme aplicável:
+
+```gitignore
+.env
+.venv/
+node_modules/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+```
+
+Revise também as planilhas e imagens antes de publicá-las no GitHub, pois elas podem conter dados pessoais ou informações que não devem ser compartilhadas.
+
+## Desenvolvimento
+
+- `frontend/`: interface gráfica.
+- `src-tauri/`: integração desktop.
+- `titivillus/`: API e lógica Python.
+- `tests/`: testes automatizados.
+
+Ao modificar as portas da API, atualize tanto o frontend quanto o script de inicialização. Preserve a lógica Python existente ao alterar a interface, exceto quando uma mudança funcional exigir alterações no backend.
