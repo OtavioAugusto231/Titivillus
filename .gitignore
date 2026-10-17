@@ -6,3 +6,16 @@ capas/
 # Ignorar arquivos temporários
 ~$*.xlsx
 ~$*.xls
+# Imagens
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.webp
+*.bmp
+*.tiff
+*.tif
+*.ico
+*.svg
+*.heic
+*.avif

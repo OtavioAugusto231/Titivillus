@@ -2,13 +2,11 @@
 Usado igualmente pelo CLI e pela GUI."""
 
 from .arquivos import renomear_foto
-from .config import EXTENSOES, MODO_FICHA
+from .config import EXTENSOES, MODO_CAPA, MODO_FICHA
 from .leitor_capa import QuotaEsgotada, ler_capa, ler_faixa_etaria
 from .leitor_ficha import ler_ficha
 from .log import log
 from .modelos import (
-    CAMPOS,
-    CAMPOS_FICHA,
     STATUS_ERRO,
     STATUS_FICHA_LIDA,
     STATUS_FICHA_NAO_IDENTIFICADA,
@@ -198,9 +196,7 @@ def executar(settings, on_resultado=None, on_progresso=None, cancelar=None):
         log("\nInterrompido. Exportando o que já foi processado...")
 
     if registros:
-        exportar_excel(
-            registros, arquivo_excel, CAMPOS_FICHA if ficha else CAMPOS
-        )
+        exportar_excel(registros, arquivo_excel, MODO_FICHA if ficha else MODO_CAPA)
         log(f"\nPlanilha criada: {arquivo_excel}")
 
     if erro_quota is not None:
