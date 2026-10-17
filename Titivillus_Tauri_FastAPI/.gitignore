@@ -1,0 +1,33 @@
+capas/
+# Ignorar arquivos
+*.xlsx
+*.xls
+*.xlsm
+# Ignorar arquivos temporários
+~$*.xlsx
+~$*.xls
+# Imagens
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.webp
+*.bmp
+*.tiff
+*.tif
+*.ico
+*.svg
+*.heic
+*.avif
+
+# Segredos e ambiente local
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+node_modules/
+dist/
+target/
+__pycache__/
+*.py[cod]

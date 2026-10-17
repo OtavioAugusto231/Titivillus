@@ -1,0 +1,1 @@
+{"name":"titivillus-desktop","private":true,"version":"1.0.0","type":"module","scripts":{"dev":"node scripts/dev-server.mjs","build":"node scripts/build.mjs","tauri":"tauri"},"devDependencies":{"@tauri-apps/cli":"^2.0.0"}}
