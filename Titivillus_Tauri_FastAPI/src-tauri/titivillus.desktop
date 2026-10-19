@@ -1,0 +1,9 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name={{name}}
+Exec={{exec}}
+Icon=/usr/share/icons/hicolor/128x128/apps/titivillus-desktop.png
+Terminal=false
+Categories=Utility;
+StartupWMClass=br.titivillus.catalogo

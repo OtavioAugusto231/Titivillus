@@ -1,4 +1,4 @@
-const API='http://127.0.0.1:8000/api';const $=id=>document.getElementById(id);let settings=null,lastState=null,hiddenLogs=false,toastTimer=null;
+const API=window.__TAURI_INTERNALS__?'http://127.0.0.1:8765/api':'http://127.0.0.1:8000/api';const $=id=>document.getElementById(id);let settings=null,lastState=null,hiddenLogs=false,toastTimer=null;
 const pageNames={overview:'Visão geral',capa:'Processar capas',ficha:'Fichas catalográficas',logs:'Registro de atividade',settings:'Configurações'};
 async function api(path,options={}){const response=await fetch(`${API}${path}`,{headers:{'Content-Type':'application/json'},...options});let data={};try{data=await response.json()}catch{}if(!response.ok)throw new Error(data.detail||`Erro HTTP ${response.status}`);return data}
 function toast(message){const el=$('toast');el.textContent=message;el.classList.add('show');clearTimeout(toastTimer);toastTimer=setTimeout(()=>el.classList.remove('show'),4200)}

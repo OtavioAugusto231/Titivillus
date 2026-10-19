@@ -4,7 +4,14 @@ import os
 import pathlib
 from dataclasses import dataclass
 
+# BASE_DIR é a raiz do código no desenvolvimento.
 BASE_DIR = pathlib.Path(__file__).resolve().parent.parent
+
+# No aplicativo empacotado, o Tauri define a pasta persistente dos dados.
+# Sem essa variável, o projeto continua usando a raiz habitual.
+DATA_DIR = pathlib.Path(
+    os.environ.get("TITIVILLUS_DATA_DIR", str(BASE_DIR))
+).expanduser().resolve()
 
 
 def carregar_env(caminho):
@@ -20,12 +27,12 @@ def carregar_env(caminho):
         os.environ.setdefault(chave.strip(), valor.strip().strip("'\""))
 
 
-carregar_env(BASE_DIR / ".env")
+carregar_env(DATA_DIR / ".env")
 
-PASTA_CAPAS = BASE_DIR / "capas"
-ARQUIVO_EXCEL = BASE_DIR / "livros.xlsx"
-PASTA_FICHAS = BASE_DIR / "fichas"
-ARQUIVO_EXCEL_FICHAS = BASE_DIR / "fichas.xlsx"
+PASTA_CAPAS = DATA_DIR / "capas"
+ARQUIVO_EXCEL = DATA_DIR / "livros.xlsx"
+PASTA_FICHAS = DATA_DIR / "fichas"
+ARQUIVO_EXCEL_FICHAS = DATA_DIR / "fichas.xlsx"
 
 MODELO = os.environ.get("GEMINI_MODEL", "gemini-3.1-flash-lite").strip()
 # Ficha catalográfica é texto miúdo e denso: dá pra usar um modelo mais forte
